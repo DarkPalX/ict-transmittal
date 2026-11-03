@@ -1,5 +1,5 @@
 <?php
-
+ 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\DashboardController;
@@ -7,14 +7,16 @@ use App\Http\Controllers\ItemController;
 use App\Http\Controllers\TransmittalController;
 use App\Http\Controllers\UserManagementController;
 use Illuminate\Support\Facades\Route;
-
-Route::redirect('/', '/dashboard');
+ 
+Route::get('/', function () {
+    return redirect()->route('dashboard');
+});
 Route::middleware('guest')->group(function () {
     Route::get('/login', [AuthController::class, 'create'])->name('login');
     Route::post('/login', [AuthController::class, 'store'])->name('login.store');
 });
 Route::post('/logout', [AuthController::class, 'destroy'])->middleware('auth')->name('logout');
-
+ 
 Route::middleware('auth')->group(function () {
     Route::get('/dashboard', DashboardController::class)->name('dashboard');
     Route::get('/audit-trail', [AuditLogController::class, 'index'])->name('audit.index');

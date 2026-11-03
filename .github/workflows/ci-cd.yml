@@ -1,0 +1,149 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, dom, fileinfo, sqlite3, pdo_sqlite
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate Composer files
+        run: composer validate --strict
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: ${{ runner.os }}-php-8.2-${{ hashFiles('composer.lock') }}
+          restore-keys: ${{ runner.os }}-php-8.2-
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Prepare test environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+          php artisan config:clear
+          touch database/database.sqlite
+          php artisan migrate --force
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Build frontend assets
+        run: npm run build
+
+      - name: Run tests
+        run: php artisan test --without-tty
+
+  deploy:
+    name: Deploy to production
+    needs: test
+    runs-on: [self-hosted, Windows, X64, transmittal]
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Update production checkout
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          GIT_TERMINAL_PROMPT: '0'
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: powershell
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:DEPLOY_PATH)) {
+            throw "Missing DEPLOY_PATH environment variable"
+          }
+          if (-not (Test-Path -LiteralPath $env:DEPLOY_PATH)) {
+            throw "Production path does not exist: $env:DEPLOY_PATH"
+          }
+          git config --global --add safe.directory $env:DEPLOY_PATH
+          $gitOptions = @(
+            '-c', 'credential.interactive=false',
+            '-c', 'http.connectTimeout=20',
+            '-c', 'http.lowSpeedLimit=1000',
+            '-c', 'http.lowSpeedTime=30'
+          )
+          $tokenBytes = [Text.Encoding]::ASCII.GetBytes("x-access-token:$env:GITHUB_TOKEN")
+          $authHeader = "AUTHORIZATION: basic " + [Convert]::ToBase64String($tokenBytes)
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = $authHeader
+          $repositoryUrl = "https://github.com/${{ github.repository }}.git"
+          git @gitOptions -C $env:DEPLOY_PATH fetch $repositoryUrl main
+          git @gitOptions -C $env:DEPLOY_PATH checkout main
+          git @gitOptions -C $env:DEPLOY_PATH merge --ff-only FETCH_HEAD
+
+      - name: Install production dependencies
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        shell: powershell
+        run: |
+          Set-Location -LiteralPath $env:DEPLOY_PATH
+          $env:Path = "C:\xampp\php;$env:Path"
+          php --version
+          composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+
+          npm ci
+          npm run build
+
+      - name: Run production migrations
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        shell: powershell
+        run: |
+          Set-Location -LiteralPath $env:DEPLOY_PATH
+          $env:Path = "C:\xampp\php;$env:Path"
+          php --version
+          php artisan migrate --force
+          # php artisan migrate:fresh --seed --force
+
+      - name: Clear and rebuild production Laravel caches
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        shell: powershell
+        run: |
+          Set-Location -LiteralPath $env:DEPLOY_PATH
+          $env:Path = "C:\xampp\php;$env:Path"
+          php --version
+
+          Write-Host "Clearing Laravel production caches..."
+          php artisan optimize:clear --no-interaction
+
+          Write-Host "Rebuilding Laravel production caches..."
+          php artisan optimize --no-interaction
+
+          Write-Host "Restarting queue workers..."
+          php artisan queue:restart
+
+          Write-Host "Production Laravel optimization completed."
