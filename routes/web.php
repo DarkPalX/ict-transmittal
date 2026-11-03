@@ -9,7 +9,7 @@ use App\Http\Controllers\UserManagementController;
 use Illuminate\Support\Facades\Route;
  
 Route::get('/', function () {
-    return redirect()->route('dashboard');
+    return redirect()->route('login');
 });
 Route::middleware('guest')->group(function () {
     Route::get('/login', [AuthController::class, 'create'])->name('login');
